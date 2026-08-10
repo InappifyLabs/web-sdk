@@ -1,0 +1,19 @@
+image: node:22
+
+variables:
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm"
+
+stages:
+  - verify
+
+verify:
+  stage: verify
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run check
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/

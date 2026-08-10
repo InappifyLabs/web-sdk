@@ -1,0 +1,8 @@
+export { InAppify } from './client'
+export type { InAppifyOptions } from './client'
+export { InAppifyError, isInAppifyError } from './errors'
+export { IndexedDbStorage, MemoryStorage } from './storage'
+export type { StorageAdapter } from './storage'
+export { Offerings, compareVersions, evaluateTargetingCondition } from './targeting'
+export type * from './types'
+export { SDK_VERSION } from './version'

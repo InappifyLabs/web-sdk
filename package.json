@@ -1,0 +1,67 @@
+{
+  "name": "@inappify/web-sdk",
+  "version": "0.1.0-beta.0",
+  "description": "Official InAppify SDK for websites and Progressive Web Apps",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/inappify.global.js",
+  "jsdelivr": "./dist/inappify.global.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "clean": "tsup --clean",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "pre-enter": "changeset pre enter beta",
+    "pre-exit": "changeset pre exit",
+    "release:beta": "npm run check && changeset publish --tag beta",
+    "release:latest": "npm run check && changeset publish",
+    "prepack": "npm run check"
+  },
+  "keywords": [
+    "inappify",
+    "sdk",
+    "web",
+    "pwa",
+    "subscription",
+    "payments"
+  ],
+  "author": "InAppify",
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.4",
+  "devDependencies": {
+    "@changesets/cli": "^2.29.0",
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^16.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}
