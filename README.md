@@ -456,4 +456,6 @@ npm run version-packages
 npm run release:beta
 ```
 
-The package is currently `UNLICENSED`. Select the public license before publishing the source repository.
+## License
+
+Released under the [MIT License](./LICENSE). Copyright © 2026 InAppify.

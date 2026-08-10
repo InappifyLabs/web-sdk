@@ -46,7 +46,7 @@
     "payments"
   ],
   "author": "InAppify",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
