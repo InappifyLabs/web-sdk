@@ -7,7 +7,7 @@ Official, framework-agnostic TypeScript SDK for websites and Progressive Web App
 ## Installation
 
 ```bash
-npm install @inappify/web-sdk
+npm install @inappifylabs/web-sdk
 ```
 
 ## Start here
@@ -32,7 +32,7 @@ Never put a project/server API key in frontend code. The Web App key is the only
 ## Complete quick start
 
 ```ts
-import { InAppify, isInAppifyError } from '@inappify/web-sdk'
+import { InAppify, isInAppifyError } from '@inappifylabs/web-sdk'
 
 const inappify = await InAppify.configure({
   apiKey: 'your_public_web_app_key',
@@ -92,7 +92,7 @@ Paywall UI and native app-store purchase verification are intentionally outside 
 ## Configure
 
 ```ts
-import { InAppify } from '@inappify/web-sdk'
+import { InAppify } from '@inappifylabs/web-sdk'
 
 const inappify = await InAppify.configure({
   apiKey: 'your_public_web_app_key',
@@ -324,7 +324,7 @@ const validation = await inappify.validateDiscountCode('WELCOME20', 'default')
 ## Errors and cancellation
 
 ```ts
-import { isInAppifyError } from '@inappify/web-sdk'
+import { isInAppifyError } from '@inappifylabs/web-sdk'
 
 try {
   await inappify.getOfferings({ forceRefresh: true })
@@ -426,7 +426,7 @@ If personalized entitlements must be available during SSR itself, use a backend-
 After publication, the browser build is available as `dist/inappify.global.js`:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@inappify/web-sdk@VERSION/dist/inappify.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@inappifylabs/web-sdk@VERSION/dist/inappify.global.js"></script>
 <script>
   const sdk = await InAppifySDK.InAppify.configure({ apiKey: 'public_key' })
 </script>
