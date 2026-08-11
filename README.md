@@ -245,13 +245,26 @@ An entitlement is accepted only when it is active and has no expiration or its e
 
 ### External identity
 
-Your backend creates a short-lived, one-time identity ticket using its server credential. Only the ticket is sent to the browser:
+When your backend returns a short-lived identity ticket, authenticate the current SDK session with:
 
 ```ts
-await inappify.loginWithIdentityTicket(identityTicket)
+const authentication = await inappify.loginWithIdentityTicket(identityTicket)
+
+console.log(authentication.isAnonymous) // false
+console.log(authentication.type) // "Authenticated"
 ```
 
-Never create identity tickets or embed server credentials in frontend code.
+`exchangeIdentityTicket` provides the same behavior and can be used instead:
+
+```ts
+const authentication = await inappify.exchangeIdentityTicket(identityTicket)
+```
+
+Call only one of these methods. `loginWithIdentityTicket` is an alias for `exchangeIdentityTicket`; calling both would try to consume the same one-time ticket twice.
+
+Both methods return `AuthResult`, not raw tokens. On success, the SDK automatically replaces the access token, persists the new refresh token, refreshes customer information and offerings, invalidates stale caches, and emits `authenticationChanged`. Applications must not replace or store the tokens themselves.
+
+Identity tickets expire after one minute and can be used only once. Create the ticket immediately before login. Never create identity tickets or embed server credentials in frontend code.
 
 ### InAppify OTP
 
