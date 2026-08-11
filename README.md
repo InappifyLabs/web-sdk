@@ -260,9 +260,17 @@ console.log(authentication.type) // "Authenticated"
 const authentication = await inappify.exchangeIdentityTicket(identityTicket)
 ```
 
-Call only one of these methods. `loginWithIdentityTicket` is an alias for `exchangeIdentityTicket`; calling both would try to consume the same one-time ticket twice.
+`loginWithIdentityTicket` is implemented as a convenience alias:
 
-Both methods return `AuthResult`, not raw tokens. On success, the SDK automatically replaces the access token, persists the new refresh token, refreshes customer information and offerings, invalidates stale caches, and emits `authenticationChanged`. Applications must not replace or store the tokens themselves.
+```ts
+async loginWithIdentityTicket(identityTicket: string, options = {}) {
+  return this.exchangeIdentityTicket(identityTicket, options)
+}
+```
+
+Call only one of these methods. Calling both would try to consume the same one-time ticket twice.
+
+Both methods return `AuthResult`, not raw tokens. On success, the SDK automatically replaces the access token, persists the new refresh token, refreshes customer information and, when enabled, offerings, invalidates stale caches, and emits `authenticationChanged`. Applications must not replace or store the tokens themselves.
 
 Identity tickets expire after one minute and can be used only once. Create the ticket immediately before login. Never create identity tickets or embed server credentials in frontend code.
 
