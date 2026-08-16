@@ -55,10 +55,11 @@ export class InAppify {
 
   private constructor(private readonly apiKey: string, options: InAppifyOptions) {
     const baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
-    const fetcher = options.fetch ?? globalThis.fetch
-    if (typeof fetcher !== 'function') {
+    const fetchImplementation = options.fetch ?? globalThis.fetch
+    if (typeof fetchImplementation !== 'function') {
       throw new InAppifyError({ kind: 'configuration', code: 'FETCH_UNAVAILABLE', message: 'A Fetch API implementation is required.' })
     }
+    const fetcher: typeof fetch = fetchImplementation.bind(globalThis)
     this.http = new HttpClient(baseUrl, fetcher, options.requestTimeoutMs ?? 15_000)
     const namespace = `inappify:${hash(`${baseUrl}:${apiKey}`)}`
     this.sessions = new SessionStore(options.storage ?? new IndexedDbStorage(), namespace)

@@ -48,6 +48,76 @@ function mockFetch(handler: (url: string, init?: RequestInit) => Response): type
 }
 
 describe('InAppify', () => {
+  it('binds a caller-provided fetch implementation to the global receiver', async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = []
+    const responses = [json(session(), 201), json(customer())]
+    const brandCheckedFetch: typeof fetch = function (this: unknown, input, init) {
+      expect(this).toBe(globalThis)
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      requests.push({ url, init })
+      const response = responses.shift()
+      if (!response) throw new Error(`Unexpected request: ${url}`)
+      return Promise.resolve(response)
+    }
+
+    const sdk = await InAppify.configure({
+      apiKey: 'public-key',
+      baseUrl: 'https://inappify.test/api/web/v1',
+      fetch: brandCheckedFetch,
+      storage: new MemoryStorage(),
+      prefetchOfferings: false,
+    })
+
+    expect(sdk.customerInfo).not.toBeNull()
+    expect(requests.map(({ url }) => url)).toEqual([
+      'https://inappify.test/api/web/v1/sessions',
+      'https://inappify.test/api/web/v1/customerInfo',
+    ])
+    expect(requests[0]?.init).toMatchObject({ method: 'POST', credentials: 'omit' })
+    expect(requests[0]?.init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('binds the default global fetch implementation to the global receiver', async () => {
+    const originalFetch = globalThis.fetch
+    const responses = [json(session(), 201), json(customer())]
+    const nativeFetch: typeof fetch = vi.fn(function (this: unknown) {
+      expect(this).toBe(globalThis)
+      const response = responses.shift()
+      if (!response) throw new Error('Unexpected fetch request.')
+      return Promise.resolve(response)
+    })
+    globalThis.fetch = nativeFetch
+
+    try {
+      const sdk = await InAppify.configure({
+        apiKey: 'public-key',
+        baseUrl: 'https://inappify.test/api/web/v1',
+        storage: new MemoryStorage(),
+        prefetchOfferings: false,
+      })
+
+      expect(sdk.customerInfo).not.toBeNull()
+      expect(nativeFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('keeps FETCH_UNAVAILABLE when no fetch implementation exists', async () => {
+    const originalFetch = globalThis.fetch
+    Reflect.deleteProperty(globalThis, 'fetch')
+
+    try {
+      await expect(InAppify.configure({
+        apiKey: 'public-key',
+        storage: new MemoryStorage(),
+        prefetchOfferings: false,
+      })).rejects.toMatchObject({ kind: 'configuration', code: 'FETCH_UNAVAILABLE' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('configures an anonymous session and prefetches cached offerings', async () => {
     let offeringsRequests = 0
     const fetcher = mockFetch((path) => {
