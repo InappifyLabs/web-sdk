@@ -1,6 +1,6 @@
 {
   "name": "@inappifylabs/web-sdk",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Official InAppify SDK for websites and Progressive Web Apps",
   "type": "module",
   "sideEffects": false,

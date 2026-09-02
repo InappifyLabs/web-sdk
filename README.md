@@ -368,7 +368,9 @@ const unsubscribe = inappify.on('customerInfoUpdated', (customerInfo) => {
 unsubscribe()
 ```
 
-Available events are `customerInfoUpdated`, `offeringsUpdated`, and `authenticationChanged`.
+Available events are `customerInfoUpdated`, `offeringsUpdated`, `authenticationChanged`, and `sessionStateChanged`.
+
+`sessionStateChanged` reports only non-sensitive metadata: `state`, an optional error `reason`, and whether the condition is retryable. Possible states are `anonymous`, `authenticated`, `refreshing`, `temporarily-unavailable`, and `recovery-required`.
 
 ## SSR frameworks
 
@@ -430,8 +432,32 @@ If personalized entitlements must be available during SSR itself, use a backend-
 - The rotating refresh token is stored in IndexedDB.
 - After a hard refresh, `configure` exchanges the stored refresh token for a new token pair.
 - Web Locks serialize refresh across tabs to prevent token reuse.
-- If IndexedDB is unavailable, storage falls back to memory and the session does not survive a page reload.
+- A temporary network, timeout, rate-limit, server, or storage failure never deletes the persisted session and never silently changes an authenticated customer into an anonymous customer.
+- If IndexedDB exists but cannot be opened or committed, `configure` returns the typed `STORAGE_UNAVAILABLE` error. It does not silently fall back to an empty in-memory session.
+- In runtimes without IndexedDB, the SDK explicitly uses memory-only storage. Check `inappify.persistenceMode`, which is either `durable` or `memory`; memory sessions do not survive a page reload.
+- When an authenticated refresh token is definitively expired, revoked, or reused, the SDK returns `SESSION_RECOVERY_REQUIRED`. Request a new one-time Identity Ticket from your backend and call `loginWithIdentityTicket(ticket)` on a newly configured/recovered SDK flow. Do not store or replace SDK tokens yourself.
+- Refresh requests use an internal idempotency key so a retry after a lost rotation response can receive the same token pair safely.
 - A custom `StorageAdapter` can be injected for testing or specialized runtimes.
+
+Handle a definitive authenticated-session expiry by creating the replacement anonymous transport session first, then exchanging a newly issued Identity Ticket from your own backend:
+
+```ts
+let inappify: InAppify
+
+try {
+  inappify = await InAppify.configure({ apiKey: 'your_public_web_app_key' })
+} catch (error) {
+  if (!(error instanceof InAppifyError) || error.code !== 'SESSION_RECOVERY_REQUIRED') {
+    throw error // transient errors should be retried without clearing host login state
+  }
+
+  inappify = await InAppify.configure({ apiKey: 'your_public_web_app_key' })
+  const identityTicket = await requestIdentityTicketFromYourBackend()
+  await inappify.loginWithIdentityTicket(identityTicket)
+}
+```
+
+Do not show “no subscription” while configuration is temporarily unavailable. Preserve the host application's loading/error state and retry instead.
 
 ## Integration rules
 

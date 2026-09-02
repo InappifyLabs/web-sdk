@@ -4,17 +4,20 @@ import { data, HttpClient, type HttpRequest } from './internal/http'
 import { mapAuth, mapCaptcha, mapCheckout, mapConfiguration, mapCustomerInfo, mapDiscount, mapOfferings, mapOtpChallenge } from './internal/mappers'
 import { SessionStore } from './internal/session-store'
 import { createId, isRecord, normalizeBaseUrl, safeRedirect, sleep } from './internal/utils'
-import { IndexedDbStorage, type StorageAdapter } from './storage'
+import { IndexedDbStorage, MemoryStorage, type PersistenceMode, type StorageAdapter } from './storage'
 import { SDK_VERSION } from './version'
 import type {
   AppConfiguration, AttributeValues, AuthResult, CaptchaChallenge, CheckEntitlementOptions, CheckoutResult, CurrentOfferingOptions, CustomerInfo, DiscountValidation, Entitlement,
   GetOfferingsOptions, InAppifyEvents, OfferingsResult, OtpChallenge, OtpRequestParams, PollCheckoutOptions,
   PurchaseOptions, PurchaseParams, RequestOptions, SyncAttribute,
-  ReservedAttributeName,
+  ReservedAttributeName, SessionState,
 } from './types'
 
 const DEFAULT_BASE_URL = 'https://api.inappify.com/api/web/v1'
 const TERMINAL_CHECKOUT_STATUSES = new Set(['Paid', 'Failed', 'Expired', 'Cancelled'])
+const DEFINITIVE_SESSION_CODES = new Set([
+  'REFRESH_TOKEN_INVALID', 'REFRESH_TOKEN_EXPIRED', 'SESSION_EXPIRED', 'SESSION_REVOKED', 'TOKEN_REUSE_DETECTED',
+])
 
 export interface InAppifyOptions {
   apiKey: string
@@ -52,6 +55,9 @@ export class InAppify {
   private _configuration: AppConfiguration | null = null
   private country: string
   private appVersion: string
+  private sessionRevision = 0
+  private _sessionState: SessionState = 'anonymous'
+  readonly persistenceMode: PersistenceMode
 
   private constructor(private readonly apiKey: string, options: InAppifyOptions) {
     const baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
@@ -62,7 +68,9 @@ export class InAppify {
     const fetcher: typeof fetch = fetchImplementation.bind(globalThis)
     this.http = new HttpClient(baseUrl, fetcher, options.requestTimeoutMs ?? 15_000)
     const namespace = `inappify:${hash(`${baseUrl}:${apiKey}`)}`
-    this.sessions = new SessionStore(options.storage ?? new IndexedDbStorage(), namespace)
+    const storage = options.storage ?? (typeof indexedDB === 'undefined' ? new MemoryStorage() : new IndexedDbStorage())
+    this.sessions = new SessionStore(storage, namespace)
+    this.persistenceMode = storage.persistenceMode ?? 'memory'
     this.refreshLockName = `${namespace}:refresh`
     this.offeringsCacheTtlMs = options.offeringsCacheTtlMs ?? 5 * 60_000
     this.shouldPrefetchOfferings = options.prefetchOfferings ?? true
@@ -86,6 +94,7 @@ export class InAppify {
 
   get customerInfo(): CustomerInfo | null { return this.customerCache }
   get isAnonymous(): boolean { return this.anonymous }
+  get sessionState(): SessionState { return this._sessionState }
 
   hasEntitlement(identifier: string): boolean {
     return this.getEntitlement(identifier) !== null
@@ -274,9 +283,13 @@ export class InAppify {
 
   private async initialize(): Promise<void> {
     const persisted = await this.sessions.getSession()
-    if (persisted && Date.parse(persisted.refreshTokenExpiresAt) > Date.now()) {
-      try { await this.refreshSession() } catch { await this.sessions.clearSession(); await this.createAnonymousSession() }
-    } else { await this.sessions.clearSession(); await this.createAnonymousSession() }
+    if (!persisted) await this.createAnonymousSession()
+    else {
+      this.anonymous = persisted.isAnonymous ?? true
+      this.sessionRevision = persisted.revision
+      if (Date.parse(persisted.refreshTokenExpiresAt) <= Date.now()) await this.handleDefinitiveRefreshFailure(persisted, sessionExpiredError())
+      else await this.refreshSession()
+    }
     await this.getCustomerInfo()
     if (this.shouldPrefetchOfferings && this.configuration.features.offerings) {
       try { await this.getOfferings() } catch { /* A later explicit call retries the prefetch. */ }
@@ -308,19 +321,70 @@ export class InAppify {
     if (this.refreshPromise) return this.refreshPromise
     const pending = this.withRefreshLock(async () => {
       const persisted = await this.sessions.getSession()
-      if (!persisted || Date.parse(persisted.refreshTokenExpiresAt) <= Date.now()) {
-        throw new InAppifyError({ kind: 'api', code: 'SESSION_EXPIRED', message: 'The InAppify session has expired.', status: 401 })
-      }
-      try { await this.refreshWithToken(persisted.refreshToken) }
-      catch (error) { await this.sessions.clearSession(); this.accessToken = null; throw error }
+      if (!persisted) throw sessionRecoveryRequired('SESSION_MISSING')
+      if (Date.parse(persisted.refreshTokenExpiresAt) <= Date.now()) return this.handleDefinitiveRefreshFailure(persisted, sessionExpiredError())
+      const attempted = await this.prepareRefreshAttempt(persisted)
+      await this.performRefreshAttempt(attempted, true)
     })
     this.refreshPromise = pending
     try { await pending } finally { if (this.refreshPromise === pending) this.refreshPromise = null }
   }
 
-  private async refreshWithToken(refreshToken: string): Promise<void> {
-    const payload = await this.http.request('sessions/refresh', { method: 'POST', body: { refresh_token: refreshToken } })
-    await this.applySession(data(payload))
+  private async performRefreshAttempt(attempted: import('./internal/session-store').PersistedSession, retryLatest: boolean): Promise<void> {
+    this.setSessionState('refreshing', undefined, true)
+    try {
+      const payload = await this.http.request('sessions/refresh', {
+        method: 'POST', body: { refresh_token: attempted.refreshToken },
+        headers: { 'Idempotency-Key': attempted.refreshIdempotencyKey! },
+      })
+      await this.applySession(data(payload), attempted)
+    } catch (error) {
+      if (classifyRefreshFailure(error) !== 'definitive-session-expiry') {
+        this.setSessionState('temporarily-unavailable', errorCode(error), true)
+        throw error
+      }
+      if (retryLatest) {
+        const latest = await this.sessions.getSession()
+        if (latest && latest.refreshToken !== attempted.refreshToken) {
+          const prepared = await this.prepareRefreshAttempt(latest)
+          await this.performRefreshAttempt(prepared, false)
+          return
+        }
+      }
+      await this.handleDefinitiveRefreshFailure(attempted, error)
+    }
+  }
+
+  private async prepareRefreshAttempt(persisted: import('./internal/session-store').PersistedSession): Promise<import('./internal/session-store').PersistedSession> {
+    if (persisted.refreshIdempotencyKey) return persisted
+    const pending = {
+      ...persisted,
+      revision: persisted.revision + 1,
+      refreshIdempotencyKey: createId(),
+      storageValue: undefined,
+    }
+    if (await this.sessions.replaceSessionIfMatches(persisted, pending)) {
+      const stored = await this.sessions.getSession()
+      if (stored) return stored
+    }
+    const latest = await this.sessions.getSession()
+    if (latest?.refreshIdempotencyKey) return latest
+    throw new InAppifyError({ kind: 'storage', code: 'SESSION_STORAGE_CONFLICT', message: 'The persisted session changed during refresh preparation.' })
+  }
+
+  private async handleDefinitiveRefreshFailure(attempted: import('./internal/session-store').PersistedSession, cause: unknown): Promise<void> {
+    const cleared = await this.sessions.clearSessionIfMatches(attempted)
+    if (!cleared) {
+      throw new InAppifyError({ kind: 'storage', code: 'SESSION_STORAGE_CONFLICT', message: 'A newer persisted session is available.', cause })
+    }
+    this.accessToken = null
+    this.accessTokenExpiresAt = 0
+    if (attempted.isAnonymous === true) {
+      await this.createAnonymousSession()
+      return
+    }
+    this.setSessionState('recovery-required', errorCode(cause), false)
+    throw sessionRecoveryRequired(errorCode(cause), cause)
   }
 
   private withRefreshLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -330,13 +394,30 @@ export class InAppify {
     return operation()
   }
 
-  private async applySession(body: Record<string, unknown>): Promise<void> {
+  private async applySession(body: Record<string, unknown>, expected?: import('./internal/session-store').PersistedSession): Promise<void> {
     const tokens = parseTokens(body)
-    this.accessToken = tokens.accessToken; this.accessTokenExpiresAt = Date.parse(tokens.accessTokenExpiresAt)
-    await this.sessions.setSession({ refreshToken: tokens.refreshToken, refreshTokenExpiresAt: tokens.refreshTokenExpiresAt })
-    this._configuration = mapConfiguration(body.configuration)
     const customer = isRecord(body.customer) ? body.customer : null
-    if (customer) this.anonymous = customer.is_anonymous === true
+    const isAnonymous = customer ? customer.is_anonymous === true : this.anonymous
+    const nextSession = {
+      refreshToken: tokens.refreshToken,
+      refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
+      isAnonymous,
+      revision: Math.max(this.sessionRevision, expected?.revision ?? 0) + 1,
+    }
+    if (expected) {
+      const replaced = await this.sessions.replaceSessionIfMatches(expected, nextSession)
+      if (!replaced) {
+        const latest = await this.sessions.getSession()
+        if (latest?.refreshToken !== tokens.refreshToken) {
+          throw new InAppifyError({ kind: 'storage', code: 'SESSION_STORAGE_CONFLICT', message: 'A newer persisted session replaced the refresh result.' })
+        }
+      }
+    } else await this.sessions.setSession(nextSession)
+    this.accessToken = tokens.accessToken; this.accessTokenExpiresAt = Date.parse(tokens.accessTokenExpiresAt)
+    this.sessionRevision = nextSession.revision
+    this._configuration = mapConfiguration(body.configuration)
+    this.anonymous = isAnonymous
+    this.setSessionState(isAnonymous ? 'anonymous' : 'authenticated', undefined, false)
   }
 
   private async applyAuthenticatedResponse(body: Record<string, unknown>): Promise<AuthResult> {
@@ -372,6 +453,11 @@ export class InAppify {
 
   private invalidateCaches(): void { this.customerCache = null; this.offeringsCache = null; this.offeringsPromise = null }
 
+  private setSessionState(state: SessionState, reason: string | undefined, retryable: boolean): void {
+    this._sessionState = state
+    this.events.emit('sessionStateChanged', { state, ...(reason === undefined ? {} : { reason }), retryable })
+  }
+
   private assertFeature(feature: keyof AppConfiguration['features']): void {
     if (!this.configuration.features[feature]) throw new InAppifyError({ kind: 'configuration', code: 'FEATURE_NOT_ENABLED', message: `The ${feature} feature is not enabled for this app.` })
   }
@@ -401,6 +487,36 @@ function hash(value: string): string {
   let result = 2166136261
   for (let index = 0; index < value.length; index += 1) { result ^= value.charCodeAt(index); result = Math.imul(result, 16777619) }
   return (result >>> 0).toString(36)
+}
+
+type RefreshFailureDisposition = 'transient' | 'definitive-session-expiry' | 'storage-unavailable' | 'unknown'
+
+function classifyRefreshFailure(error: unknown): RefreshFailureDisposition {
+  if (!isInAppifyError(error)) return 'unknown'
+  if (error.kind === 'network' || error.kind === 'timeout') return 'transient'
+  if (error.kind === 'storage') return 'storage-unavailable'
+  if (DEFINITIVE_SESSION_CODES.has(error.code)) return 'definitive-session-expiry'
+  if (error.status === 408 || error.status === 429 || (error.status !== null && error.status >= 500)) return 'transient'
+  return 'unknown'
+}
+
+function errorCode(error: unknown): string {
+  return isInAppifyError(error) ? error.code : 'UNKNOWN_REFRESH_FAILURE'
+}
+
+function sessionExpiredError(): InAppifyError {
+  return new InAppifyError({ kind: 'api', code: 'SESSION_EXPIRED', message: 'The InAppify session has expired.', status: 401 })
+}
+
+function sessionRecoveryRequired(reason: string, cause?: unknown): InAppifyError {
+  return new InAppifyError({
+    kind: 'api',
+    code: 'SESSION_RECOVERY_REQUIRED',
+    message: 'The InAppify session must be authenticated again by the host application.',
+    status: 401,
+    details: { reason },
+    cause,
+  })
 }
 
 function isEntitlementActive(entitlement: Entitlement): boolean {

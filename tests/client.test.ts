@@ -9,17 +9,17 @@ const configuration = {
   attributes: { writable: ['language'], writable_reserved: ['$email', '$displayName'] },
 }
 
-function session(access = 'access-1', refresh = 'refresh-1') {
+function session(access = 'access-1', refresh = 'refresh-1', anonymous = true) {
   return { status: true, data: {
     access_token: access, access_token_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
     refresh_token: refresh, refresh_token_expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    customer: { is_anonymous: true }, configuration,
+    customer: { is_anonymous: anonymous }, configuration,
   } }
 }
 
-function customer(entitlements: unknown[] = []) {
+function customer(entitlements: unknown[] = [], originalAppUserId = '$InaAnonymousId_123') {
   return { status: true, data: { customerInfo: {
-    originalAppUserId: '$InaAnonymousId_123', firstSeen: '2026-01-01T00:00:00+00:00', requestDate: '2026-01-01T00:00:00+00:00',
+    originalAppUserId, firstSeen: '2026-01-01T00:00:00+00:00', requestDate: '2026-01-01T00:00:00+00:00',
     latestExpirationDate: null, hasUsedTrial: false, entitlements, transactions: [], attributes: [],
   } } }
 }
@@ -48,6 +48,163 @@ function mockFetch(handler: (url: string, init?: RequestInit) => Response): type
 }
 
 describe('InAppify', () => {
+  it('preserves an authenticated persisted session and reuses the refresh idempotency key after a network failure', async () => {
+    const storage = new MemoryStorage()
+    let sessionCreates = 0
+    let refreshAttempts = 0
+    let authenticated = false
+    const refreshKeys: string[] = []
+    const fetcher = mockFetch((path, init) => {
+      if (path.endsWith('/sessions')) { sessionCreates += 1; return json(session()) }
+      if (path.endsWith('/customerInfo')) return json(customer([], authenticated ? 'user-42' : '$InaAnonymousId_123'))
+      if (path.endsWith('/offerings')) return json(offerings())
+      if (path.endsWith('/auth/external/exchange')) { authenticated = true; return json(session('auth-access', 'auth-refresh', false)) }
+      if (path.endsWith('/sessions/refresh')) {
+        refreshAttempts += 1
+        refreshKeys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+        if (refreshAttempts === 1) throw new TypeError('Offline')
+        return json(session('restored-access', 'restored-refresh', false))
+      }
+      return json({}, 404)
+    })
+
+    const first = await InAppify.configure({ apiKey: 'public-key', fetch: fetcher, storage, prefetchOfferings: false })
+    await first.loginWithIdentityTicket('ticket')
+
+    await expect(InAppify.configure({ apiKey: 'public-key', fetch: fetcher, storage, prefetchOfferings: false }))
+      .rejects.toMatchObject({ kind: 'network', code: 'NETWORK_ERROR' })
+
+    const restored = await InAppify.configure({ apiKey: 'public-key', fetch: fetcher, storage, prefetchOfferings: false })
+    expect(restored.isAnonymous).toBe(false)
+    expect(sessionCreates).toBe(1)
+    expect(refreshKeys).toHaveLength(2)
+    expect(refreshKeys[0]).not.toBe('')
+    expect(refreshKeys[1]).toBe(refreshKeys[0])
+  })
+
+  it('keeps the pending refresh result recoverable when durable storage fails after rotation', async () => {
+    const backing = new MemoryStorage()
+    let compareAndSetCalls = 0
+    const storage = {
+      persistenceMode: 'durable' as const,
+      getItem: (key: string) => backing.getItem(key),
+      setItem: (key: string, value: string) => backing.setItem(key, value),
+      removeItem: (key: string) => backing.removeItem(key),
+      compareAndRemoveItem: (key: string, expected: string) => backing.compareAndRemoveItem(key, expected),
+      compareAndSetItem: async (key: string, expected: string, value: string) => {
+        compareAndSetCalls += 1
+        if (compareAndSetCalls === 2) {
+          throw new InAppifyError({ kind: 'storage', code: 'STORAGE_UNAVAILABLE', message: 'Write failed.' })
+        }
+        return backing.compareAndSetItem(key, expected, value)
+      },
+    }
+    let authenticated = false
+    const refreshKeys: string[] = []
+    const fetcher = mockFetch((path, init) => {
+      if (path.endsWith('/sessions')) return json(session())
+      if (path.endsWith('/customerInfo')) return json(customer([], authenticated ? 'user-42' : '$InaAnonymousId_123'))
+      if (path.endsWith('/offerings')) return json(offerings())
+      if (path.endsWith('/auth/external/exchange')) { authenticated = true; return json(session('auth-access', 'auth-refresh', false)) }
+      if (path.endsWith('/sessions/refresh')) {
+        refreshKeys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+        return json(session('restored-access', 'restored-refresh', false))
+      }
+      return json({}, 404)
+    })
+
+    const first = await InAppify.configure({ apiKey: 'storage-write-key', fetch: fetcher, storage, prefetchOfferings: false })
+    await first.loginWithIdentityTicket('ticket')
+    await expect(InAppify.configure({ apiKey: 'storage-write-key', fetch: fetcher, storage, prefetchOfferings: false }))
+      .rejects.toMatchObject({ kind: 'storage', code: 'STORAGE_UNAVAILABLE' })
+
+    const restored = await InAppify.configure({ apiKey: 'storage-write-key', fetch: fetcher, storage, prefetchOfferings: false })
+    expect(restored.isAnonymous).toBe(false)
+    expect(refreshKeys).toHaveLength(2)
+    expect(refreshKeys[1]).toBe(refreshKeys[0])
+  })
+
+  it.each([
+    [500, 'HTTP_500'],
+    [429, 'HTTP_429'],
+    [401, 'HTTP_401'],
+  ])('does not replace an authenticated session after HTTP %i refresh failure', async (status, code) => {
+    const storage = new MemoryStorage()
+    let sessionCreates = 0
+    let failRefresh = false
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) { sessionCreates += 1; return json(session()) }
+      if (path.endsWith('/customerInfo')) return json(customer())
+      if (path.endsWith('/offerings')) return json(offerings())
+      if (path.endsWith('/auth/external/exchange')) return json(session('auth-access', 'auth-refresh', false))
+      if (path.endsWith('/sessions/refresh')) {
+        if (failRefresh) return json({ status: false, message: 'Refresh failed.' }, status)
+        return json(session('restored-access', 'restored-refresh', false))
+      }
+      return json({}, 404)
+    })
+
+    const first = await InAppify.configure({ apiKey: `public-key-${status}`, fetch: fetcher, storage, prefetchOfferings: false })
+    await first.loginWithIdentityTicket('ticket')
+    failRefresh = true
+
+    await expect(InAppify.configure({ apiKey: `public-key-${status}`, fetch: fetcher, storage, prefetchOfferings: false }))
+      .rejects.toMatchObject({ code })
+    expect(sessionCreates).toBe(1)
+  })
+
+  it('requires host recovery instead of downgrading an expired authenticated session', async () => {
+    const storage = new MemoryStorage()
+    let sessionCreates = 0
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) { sessionCreates += 1; return json(session()) }
+      if (path.endsWith('/customerInfo')) return json(customer())
+      if (path.endsWith('/offerings')) return json(offerings())
+      if (path.endsWith('/auth/external/exchange')) return json(session('auth-access', 'auth-refresh', false))
+      if (path.endsWith('/sessions/refresh')) return json({ status: false, code: 'SESSION_EXPIRED', message: 'Expired.' }, 401)
+      return json({}, 404)
+    })
+
+    const first = await InAppify.configure({ apiKey: 'recovery-key', fetch: fetcher, storage, prefetchOfferings: false })
+    await first.loginWithIdentityTicket('ticket')
+
+    await expect(InAppify.configure({ apiKey: 'recovery-key', fetch: fetcher, storage, prefetchOfferings: false }))
+      .rejects.toMatchObject({ code: 'SESSION_RECOVERY_REQUIRED', details: { reason: 'SESSION_EXPIRED' } })
+    expect(sessionCreates).toBe(1)
+  })
+
+  it('replaces a definitively expired anonymous session with a new anonymous session', async () => {
+    const storage = new MemoryStorage()
+    let sessionCreates = 0
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) { sessionCreates += 1; return json(session(`access-${sessionCreates}`, `refresh-${sessionCreates}`)) }
+      if (path.endsWith('/customerInfo')) return json(customer())
+      if (path.endsWith('/sessions/refresh')) return json({ status: false, code: 'REFRESH_TOKEN_EXPIRED', message: 'Expired.' }, 401)
+      return json({}, 404)
+    })
+
+    await InAppify.configure({ apiKey: 'anonymous-key', fetch: fetcher, storage, prefetchOfferings: false })
+    const replacement = await InAppify.configure({ apiKey: 'anonymous-key', fetch: fetcher, storage, prefetchOfferings: false })
+
+    expect(replacement.isAnonymous).toBe(true)
+    expect(sessionCreates).toBe(2)
+  })
+
+  it('surfaces storage read failures instead of creating an anonymous session', async () => {
+    let requests = 0
+    const storage = {
+      persistenceMode: 'durable' as const,
+      getItem: () => Promise.reject(new InAppifyError({ kind: 'storage', code: 'STORAGE_UNAVAILABLE', message: 'Unavailable.' })),
+      setItem: () => Promise.resolve(),
+      removeItem: () => Promise.resolve(),
+    }
+    const fetcher = mockFetch(() => { requests += 1; return json({}, 500) })
+
+    await expect(InAppify.configure({ apiKey: 'storage-key', fetch: fetcher, storage, prefetchOfferings: false }))
+      .rejects.toMatchObject({ kind: 'storage', code: 'STORAGE_UNAVAILABLE' })
+    expect(requests).toBe(0)
+  })
+
   it('binds a caller-provided fetch implementation to the global receiver', async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = []
     const responses = [json(session(), 201), json(customer())]
