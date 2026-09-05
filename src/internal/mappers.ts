@@ -1,4 +1,5 @@
-import type { AuthResult, CaptchaChallenge, CheckoutResult, CustomerInfo, DiscountValidation, Offering, OfferingsResult, OtpChallenge, TargetingContext, TargetingRule } from '../types'
+import type { AuthResult, CaptchaChallenge, CheckoutResult, ConsumableDelivery, CustomerInfo, DiscountValidation, Offering, OfferingsResult, OtpChallenge, TargetingContext, TargetingRule } from '../types'
+import { InAppifyError } from '../errors'
 import { Offerings } from '../targeting'
 import { array, boolean, isRecord, nullableString, number, string } from './utils'
 
@@ -117,6 +118,35 @@ export function mapCheckout(value: unknown): CheckoutResult {
     checkout: { id: string(checkout.id), status: string(checkout.status), expiresAt: string(checkout.expires_at) },
     price: { originalAmount: number(price.original_amount), discountAmount: number(price.discount_amount), finalAmount: number(price.final_amount), currency: string(price.currency) },
     nextAction: { type: string(next.type), url: nullableString(next.url) },
+  }
+}
+
+export function mapConsumableDelivery(value: unknown): ConsumableDelivery {
+  const root = isRecord(value) ? value : {}
+  const deliveryId = number(root.deliveryId)
+  const status = string(root.status)
+  const source = string(root.source)
+  const productIdentifier = string(root.productIdentifier)
+
+  if (!Number.isSafeInteger(deliveryId) || deliveryId <= 0 ||
+      !['DELIVERY_REQUIRED', 'CONSUME_REQUIRED', 'COMPLETED'].includes(status) ||
+      !['direct', 'bazar', 'myket'].includes(source) || productIdentifier === '') {
+    throw new InAppifyError({
+      kind: 'api',
+      code: 'INVALID_CONSUMABLE_DELIVERY_RESPONSE',
+      message: 'The API returned an invalid consumable delivery.',
+    })
+  }
+
+  return {
+    deliveryId,
+    status: status as ConsumableDelivery['status'],
+    source: source as ConsumableDelivery['source'],
+    paymentId: typeof root.paymentId === 'number' && Number.isSafeInteger(root.paymentId) ? root.paymentId : null,
+    transactionId: nullableString(root.transactionId),
+    productIdentifier,
+    alreadyDelivered: boolean(root.alreadyDelivered),
+    consumeAttempts: Math.max(0, number(root.consumeAttempts)),
   }
 }
 

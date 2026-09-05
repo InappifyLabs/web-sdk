@@ -363,6 +363,69 @@ describe('InAppify', () => {
     expect(idempotencyKey).toMatch(/^[0-9a-f-]{36}$/)
   })
 
+  it('synchronizes each direct consumable delivery once per SDK instance', async () => {
+    let deliveryPending = true
+    let pendingRequests = 0
+    let acknowledgements = 0
+    const handler = vi.fn(async () => Promise.resolve())
+    const delivery = {
+      deliveryId: 42,
+      status: 'DELIVERY_REQUIRED',
+      source: 'direct',
+      paymentId: 1001,
+      transactionId: '1788500012345',
+      productIdentifier: 'coins_100',
+      alreadyDelivered: false,
+      consumeAttempts: 0,
+    }
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) return json(session(), 201)
+      if (path.endsWith('/customerInfo')) return json(customer())
+      if (path.endsWith('/consumable-deliveries')) {
+        pendingRequests += 1
+        return json({ status: true, data: { deliveries: deliveryPending ? [delivery] : [] } })
+      }
+      if (path.endsWith('/consumable-deliveries/42/delivered')) {
+        acknowledgements += 1
+        deliveryPending = false
+        return json({ status: true, data: { ...delivery, status: 'COMPLETED', alreadyDelivered: true } })
+      }
+      return json({}, 404)
+    })
+    const sdk = await InAppify.configure({ apiKey: 'public-key', fetch: fetcher, storage: new MemoryStorage(), prefetchOfferings: false })
+
+    const [first, second] = await Promise.all([
+      sdk.syncPendingConsumables(handler),
+      sdk.syncPendingConsumables(handler),
+    ])
+
+    expect(first.deliveries).toHaveLength(1)
+    expect(second).toEqual(first)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ deliveryId: 42, productIdentifier: 'coins_100' }))
+    expect(acknowledgements).toBe(1)
+    expect(pendingRequests).toBe(2)
+  })
+
+  it('does not acknowledge a consumable when the host delivery handler fails', async () => {
+    let acknowledgements = 0
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) return json(session(), 201)
+      if (path.endsWith('/customerInfo')) return json(customer())
+      if (path.endsWith('/consumable-deliveries')) return json({ status: true, data: { deliveries: [{
+        deliveryId: 43, status: 'DELIVERY_REQUIRED', source: 'direct', paymentId: null, transactionId: null,
+        productIdentifier: 'gems_10', alreadyDelivered: false, consumeAttempts: 0,
+      }] } })
+      if (path.includes('/delivered')) { acknowledgements += 1; return json({}, 500) }
+      return json({}, 404)
+    })
+    const sdk = await InAppify.configure({ apiKey: 'public-key', fetch: fetcher, storage: new MemoryStorage(), prefetchOfferings: false })
+
+    await expect(sdk.syncPendingConsumables(() => { throw new Error('Inventory transaction failed.') }))
+      .rejects.toThrow('Inventory transaction failed.')
+    expect(acknowledgements).toBe(0)
+  })
+
   it('returns structured API errors', async () => {
     const fetcher = mockFetch(() => json({ status: false, code: 'WEB_APP_NOT_FOUND', message: 'Unavailable' }, 404))
     const promise = InAppify.configure({ apiKey: 'invalid', fetch: fetcher, storage: new MemoryStorage() })

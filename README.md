@@ -336,6 +336,37 @@ if (result.checkout.status === 'Paid') {
 
 Never trust success query parameters from the browser callback.
 
+## Consumable products
+
+A consumable purchase creates a separate delivery for every successful payment. Entitlements do not represent the customer's consumable balance, and spending coins, credits, or items remains the responsibility of your application.
+
+After a successful payment return—and also on application start or reconnect—synchronize pending deliveries:
+
+```ts
+const result = await inappify.syncPendingConsumables(async (delivery) => {
+  // This operation MUST be idempotent by delivery.deliveryId.
+  // For valuable products, grant the item on your trusted backend.
+  await grantConsumableOnYourBackend({
+    deliveryId: delivery.deliveryId,
+    productIdentifier: delivery.productIdentifier,
+    transactionId: delivery.transactionId,
+  })
+})
+
+console.log(result.deliveries.length)
+```
+
+The SDK calls `acknowledgeConsumableDelivery` only after the handler succeeds. If the handler throws, the delivery remains pending and can be synchronized again. A lost acknowledgement response may cause the handler to receive the same delivery again, so your inventory transaction must store `deliveryId` under a unique constraint while granting the item:
+
+```text
+BEGIN
+  INSERT processed_inappify_deliveries(delivery_id)  -- UNIQUE
+  UPDATE customer_inventory ...
+COMMIT
+```
+
+For a manual flow, use `getPendingConsumableDeliveries()` and call `acknowledgeConsumableDelivery(deliveryId)` only after durable delivery. Do not derive an amount such as “100 coins” from `productIdentifier`; map product identifiers in your own trusted configuration. The Web SDK handles direct web payments only and never calls Bazaar/Myket store-consume APIs.
+
 ## Discount validation
 
 ```ts
@@ -368,7 +399,7 @@ const unsubscribe = inappify.on('customerInfoUpdated', (customerInfo) => {
 unsubscribe()
 ```
 
-Available events are `customerInfoUpdated`, `offeringsUpdated`, `authenticationChanged`, and `sessionStateChanged`.
+Available events are `customerInfoUpdated`, `offeringsUpdated`, `authenticationChanged`, `sessionStateChanged`, and `consumableDelivered`.
 
 `sessionStateChanged` reports only non-sensitive metadata: `state`, an optional error `reason`, and whether the condition is retryable. Possible states are `anonymous`, `authenticated`, `refreshing`, `temporarily-unavailable`, and `recovery-required`.
 
@@ -422,6 +453,9 @@ If personalized entitlements must be available during SSR itself, use a backend-
 | `purchase(params, options)` | Create checkout and normally redirect | Yes |
 | `getCheckoutStatus(id)` | Read authoritative payment state | Yes |
 | `handlePaymentReturn(id)` | Poll until payment reaches a terminal state | Yes |
+| `getPendingConsumableDeliveries()` | Fetch direct consumable deliveries awaiting fulfillment | Yes |
+| `acknowledgeConsumableDelivery(id)` | Mark an idempotently fulfilled delivery as completed | Yes |
+| `syncPendingConsumables(handler)` | Deliver and acknowledge all pending batches with single-flight protection | Yes |
 | `loginWithIdentityTicket(ticket)` | Exchange a backend-issued identity ticket | Yes |
 | `requestOtp`, `verifyOtp` | Authenticate through InAppify OTP | Yes |
 | `logout()` | Replace the current identity with a new anonymous session | Yes |

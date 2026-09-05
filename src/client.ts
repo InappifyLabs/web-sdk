@@ -1,13 +1,13 @@
 import { InAppifyError, isInAppifyError } from './errors'
 import { EventEmitter } from './internal/events'
 import { data, HttpClient, type HttpRequest } from './internal/http'
-import { mapAuth, mapCaptcha, mapCheckout, mapConfiguration, mapCustomerInfo, mapDiscount, mapOfferings, mapOtpChallenge } from './internal/mappers'
+import { mapAuth, mapCaptcha, mapCheckout, mapConfiguration, mapConsumableDelivery, mapCustomerInfo, mapDiscount, mapOfferings, mapOtpChallenge } from './internal/mappers'
 import { SessionStore } from './internal/session-store'
 import { createId, isRecord, normalizeBaseUrl, safeRedirect, sleep } from './internal/utils'
 import { IndexedDbStorage, MemoryStorage, type PersistenceMode, type StorageAdapter } from './storage'
 import { SDK_VERSION } from './version'
 import type {
-  AppConfiguration, AttributeValues, AuthResult, CaptchaChallenge, CheckEntitlementOptions, CheckoutResult, CurrentOfferingOptions, CustomerInfo, DiscountValidation, Entitlement,
+  AppConfiguration, AttributeValues, AuthResult, CaptchaChallenge, CheckEntitlementOptions, CheckoutResult, ConsumableDelivery, ConsumableDeliveryHandler, ConsumableSyncOptions, ConsumableSyncResult, CurrentOfferingOptions, CustomerInfo, DiscountValidation, Entitlement,
   GetOfferingsOptions, InAppifyEvents, OfferingsResult, OtpChallenge, OtpRequestParams, PollCheckoutOptions,
   PurchaseOptions, PurchaseParams, RequestOptions, SyncAttribute,
   ReservedAttributeName, SessionState,
@@ -49,6 +49,7 @@ export class InAppify {
   private accessTokenExpiresAt = 0
   private refreshPromise: Promise<void> | null = null
   private offeringsPromise: Promise<OfferingsResult> | null = null
+  private consumableSyncPromise: Promise<ConsumableSyncResult> | null = null
   private offeringsCache: { value: OfferingsResult; expiresAt: number } | null = null
   private customerCache: CustomerInfo | null = null
   private anonymous = true
@@ -242,6 +243,59 @@ export class InAppify {
       }
       await sleep(intervalMs, options.signal)
     }
+  }
+
+  async getPendingConsumableDeliveries(options: RequestOptions = {}): Promise<readonly ConsumableDelivery[]> {
+    const payload = await this.authenticatedRequest('consumable-deliveries', { signal: options.signal })
+    const body = data(payload)
+    const deliveries = Array.isArray(body.deliveries) ? body.deliveries : []
+    return Object.freeze(deliveries.map(mapConsumableDelivery))
+  }
+
+  async acknowledgeConsumableDelivery(deliveryId: number, options: RequestOptions = {}): Promise<ConsumableDelivery> {
+    if (!Number.isSafeInteger(deliveryId) || deliveryId <= 0) {
+      throw new InAppifyError({ kind: 'configuration', code: 'INVALID_DELIVERY_ID', message: 'deliveryId must be a positive safe integer.' })
+    }
+    const payload = await this.authenticatedRequest(`consumable-deliveries/${deliveryId}/delivered`, { method: 'POST', signal: options.signal })
+    const delivery = mapConsumableDelivery(data(payload))
+    this.events.emit('consumableDelivered', delivery)
+    return delivery
+  }
+
+  async syncPendingConsumables(handler: ConsumableDeliveryHandler, options: ConsumableSyncOptions = {}): Promise<ConsumableSyncResult> {
+    if (this.consumableSyncPromise) return this.consumableSyncPromise
+    const maxBatches = options.maxBatches ?? 100
+    if (!Number.isSafeInteger(maxBatches) || maxBatches <= 0) {
+      throw new InAppifyError({ kind: 'configuration', code: 'INVALID_MAX_BATCHES', message: 'maxBatches must be a positive safe integer.' })
+    }
+
+    const pending = (async () => {
+      const completed: ConsumableDelivery[] = []
+      let batches = 0
+      while (batches < maxBatches) {
+        const deliveries = await this.getPendingConsumableDeliveries({ signal: options.signal })
+        if (deliveries.length === 0) return { deliveries: Object.freeze(completed), batches }
+        batches += 1
+        for (const delivery of deliveries) {
+          if (delivery.status !== 'DELIVERY_REQUIRED' || delivery.source !== 'direct') {
+            throw new InAppifyError({
+              kind: 'api', code: 'UNSUPPORTED_CONSUMABLE_ACTION',
+              message: 'The Web SDK received a consumable delivery action that requires a native store SDK.',
+            })
+          }
+          await handler(delivery)
+          const acknowledged = await this.acknowledgeConsumableDelivery(delivery.deliveryId, { signal: options.signal })
+          if (acknowledged.status !== 'COMPLETED') {
+            throw new InAppifyError({ kind: 'api', code: 'CONSUMABLE_ACKNOWLEDGEMENT_INCOMPLETE', message: 'The consumable delivery was not completed by the API.' })
+          }
+          completed.push(acknowledged)
+        }
+      }
+      throw new InAppifyError({ kind: 'api', code: 'CONSUMABLE_SYNC_LIMIT_REACHED', message: 'Consumable synchronization reached the configured batch limit.' })
+    })()
+
+    this.consumableSyncPromise = pending
+    try { return await pending } finally { if (this.consumableSyncPromise === pending) this.consumableSyncPromise = null }
   }
 
   async exchangeIdentityTicket(identityTicket: string, options: RequestOptions = {}): Promise<AuthResult> {

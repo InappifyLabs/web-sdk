@@ -2,6 +2,13 @@
 
 This file is managed by Changesets when a release version is prepared.
 
+## 0.1.0-beta.4
+
+### Minor Changes
+
+- Add direct-web consumable fulfillment APIs, typed delivery models, batched recovery synchronization, per-instance single-flight protection, and delivery completion events.
+- Document the required idempotent host inventory transaction and keep native store consumption outside the Web SDK.
+
 ## 0.1.0-beta.3
 
 ### Patch Changes

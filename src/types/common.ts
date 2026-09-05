@@ -9,4 +9,5 @@ export interface InAppifyEvents {
   offeringsUpdated: import('./offering').OfferingsResult
   authenticationChanged: import('./auth').AuthResult
   sessionStateChanged: SessionStateChange
+  consumableDelivered: import('./consumable').ConsumableDelivery
 }
