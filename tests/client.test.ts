@@ -17,10 +17,10 @@ function session(access = 'access-1', refresh = 'refresh-1', anonymous = true) {
   } }
 }
 
-function customer(entitlements: unknown[] = [], originalAppUserId = '$InaAnonymousId_123') {
+function customer(entitlements: unknown[] = [], originalAppUserId = '$InaAnonymousId_123', transactions: unknown[] = []) {
   return { status: true, data: { customerInfo: {
     originalAppUserId, firstSeen: '2026-01-01T00:00:00+00:00', requestDate: '2026-01-01T00:00:00+00:00',
-    latestExpirationDate: null, hasUsedTrial: false, entitlements, transactions: [], attributes: [],
+    latestExpirationDate: null, hasUsedTrial: false, entitlements, transactions, attributes: [],
   } } }
 }
 
@@ -295,6 +295,44 @@ describe('InAppify', () => {
     expect(second).toBe(first)
     expect(offeringsRequests).toBe(1)
     await expect(sdk.getCurrentOffering({ placementIdentifier: 'home_banner' })).resolves.toMatchObject({ identifier: 'home' })
+  })
+
+  it('preserves non-store transaction amount variance in customer info', async () => {
+    const transaction = {
+      number: 'payment-1',
+      status: 2,
+      amount: 100_000,
+      amountVariance: -5_000,
+      transactionDate: '2026-01-02 12:00:00',
+      trackingNumber: 'reference-1',
+      isCryptoGate: false,
+      packageName: 'Monthly',
+      storePurchaseRefId: null,
+      isTrial: false,
+    }
+    const fetcher = mockFetch((path) => {
+      if (path.endsWith('/sessions')) return json(session(), 201)
+      if (path.endsWith('/customerInfo')) return json(customer([], '$InaAnonymousId_123', [
+        transaction,
+        { ...transaction, number: 'legacy-payment', amountVariance: undefined },
+      ]))
+      return json({}, 404)
+    })
+
+    const sdk = await InAppify.configure({
+      apiKey: 'public-key',
+      fetch: fetcher,
+      storage: new MemoryStorage(),
+      prefetchOfferings: false,
+    })
+
+    expect(sdk.customerInfo?.transactions[0]).toMatchObject({
+      number: 'payment-1',
+      amount: 100_000,
+      amountVariance: -5_000,
+      storePurchaseRefId: null,
+    })
+    expect(sdk.customerInfo?.transactions[1]?.amountVariance).toBeNull()
   })
 
   it('restores a session by rotating the persisted refresh token', async () => {

@@ -2,8 +2,6 @@
 
 Official, framework-agnostic TypeScript SDK for websites and Progressive Web Apps.
 
-> This repository is under private development. Do not use it in production until a release is published.
-
 ## Installation
 
 ```bash
@@ -84,6 +82,7 @@ async function buy(packageIdentifier: string) {
 - External identity tickets and InAppify OTP authentication
 - Discount validation
 - Idempotent checkout creation, safe payment redirects, and authoritative payment polling
+- Idempotent delivery and recovery for direct-web consumable purchases
 - ESM, CommonJS, TypeScript declarations, and a browser/CDN bundle
 - Structured errors, cancellation through `AbortSignal`, request timeouts, and typed events
 
@@ -336,6 +335,18 @@ if (result.checkout.status === 'Paid') {
 
 Never trust success query parameters from the browser callback.
 
+## Customer access and transactions
+
+`customerInfo.entitlements` contains access rights for subscription and non-consumable products. The `entitlementType` value identifies the server-side product type (`Subscription`, `NonConsumable`, or `Consumable` when present). Use `hasEntitlement` when you only need an access check:
+
+```ts
+if (inappify.hasEntitlement('premium')) {
+  // Unlock access.
+}
+```
+
+Recent direct-payment records are available through `customerInfo.transactions`. `amount` is the authoritative charged amount and `amountVariance` reports any gateway-confirmed variance when available; otherwise it is `null`. Store purchase references are intentionally not populated for Web SDK payments.
+
 ## Consumable products
 
 A consumable purchase creates a separate delivery for every successful payment. Entitlements do not represent the customer's consumable balance, and spending coins, credits, or items remains the responsibility of your application.
@@ -532,9 +543,8 @@ The package follows Semantic Versioning and uses Changesets:
 
 ```bash
 npm run changeset
-npm run pre-enter
 npm run version-packages
-npm run release:beta
+npm run release:latest
 ```
 
 ## License

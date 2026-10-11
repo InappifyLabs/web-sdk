@@ -52,6 +52,7 @@ export function mapCustomerInfo(value: unknown): CustomerInfo {
       const row = isRecord(item) ? item : {}
       return {
         number: nullableString(row.number), status: typeof row.status === 'number' ? row.status : null, amount: typeof row.amount === 'number' ? row.amount : null,
+        amountVariance: typeof row.amountVariance === 'number' ? row.amountVariance : null,
         transactionDate: nullableString(row.transactionDate), trackingNumber: nullableString(row.trackingNumber), isCryptoGate: boolean(row.isCryptoGate),
         packageName: nullableString(row.packageName), storePurchaseRefId: nullableString(row.storePurchaseRefId), isTrial: boolean(row.isTrial),
       }

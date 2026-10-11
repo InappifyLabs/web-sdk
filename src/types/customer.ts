@@ -17,6 +17,7 @@ export interface Transaction {
   number: string | null
   status: number | null
   amount: number | null
+  amountVariance: number | null
   transactionDate: string | null
   trackingNumber: string | null
   isCryptoGate: boolean
